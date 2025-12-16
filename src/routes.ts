@@ -2,20 +2,96 @@ import { createAuthEndpoint } from "@better-auth/core/api";
 import type { User } from "better-auth";
 import { APIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
+import { randomBytes } from "node:crypto";
 import { nip19 } from "nostr-tools";
 import { unpackEventFromToken, validateEvent } from "nostr-tools/nip98";
 import type { NostrOptions, NostrPubkey } from "./types";
+
+const DEFAULT_NONCE_TTL = 5 * 60 * 1000;
+
+const createDefaultNonce = () => randomBytes(16).toString("hex");
+
+export const getNostrNonce = (opts?: NostrOptions) =>
+  createAuthEndpoint(
+    "/nostr/nonce",
+    {
+      method: "POST",
+      metadata: {
+        openapi: {
+          operationId: "getNostrNonce",
+          description: "Get a one-time nonce for Nostr login",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["publicKey"],
+                  properties: {
+                    publicKey: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: "Success",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["nonce"],
+                    properties: {
+                      nonce: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (ctx) => {
+      const { publicKey } = ctx.body;
+      const ttlMs = opts?.nonceTtlMs ?? DEFAULT_NONCE_TTL;
+      const nonce = (await opts?.getNonce?.()) ?? createDefaultNonce();
+
+      await ctx.context.internalAdapter.createVerificationValue({
+        identifier: `nostr:${publicKey}`,
+        expiresAt: new Date(Date.now() + ttlMs),
+        value: nonce,
+      });
+
+      return ctx.json({ nonce }, { status: 200 });
+    }
+  );
 
 export const loginNostr = (opts?: NostrOptions) =>
   createAuthEndpoint(
     "/nostr/login",
     {
       method: "POST",
-      disableBody: true,
       metadata: {
         openapi: {
           operationId: "loginNostr",
           description: "Login using Nostr (NIP-98)",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["nonce"],
+                  properties: {
+                    nonce: { type: "string" },
+                    publicKey: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
           responses: {
             200: {
               description: "Success",
@@ -42,6 +118,14 @@ export const loginNostr = (opts?: NostrOptions) =>
         });
       }
 
+      const body = (ctx.body || {}) as { nonce?: string };
+      const nonce = typeof body.nonce === "string" ? body.nonce.trim() : "";
+      if (!nonce) {
+        throw new APIError("BAD_REQUEST", {
+          message: "Missing nonce",
+        });
+      }
+
       const event = await unpackEventFromToken(token).catch((error) => {
         throw new APIError("BAD_REQUEST", {
           message: error.message || "Invalid token",
@@ -52,11 +136,33 @@ export const loginNostr = (opts?: NostrOptions) =>
       loginUrl.search = "";
       loginUrl.hash = "";
 
-      await validateEvent(event, loginUrl.toString(), "post").catch((error) => {
+      await validateEvent(event, loginUrl.toString(), "post", { nonce }).catch(
+        (error) => {
+          throw new APIError("UNAUTHORIZED", {
+            message: error.message || "Invalid event",
+          });
+        }
+      );
+
+      const verification =
+        await ctx.context.internalAdapter.findVerificationValue(
+          `nostr:${event.pubkey}`
+        );
+
+      if (
+        !verification ||
+        new Date() > verification.expiresAt ||
+        verification.value !== nonce
+      ) {
         throw new APIError("UNAUTHORIZED", {
-          message: error.message || "Invalid event",
+          message: "Invalid or expired nonce",
+          status: 401,
         });
-      });
+      }
+
+      await ctx.context.internalAdapter.deleteVerificationValue(
+        verification.id
+      );
 
       let nostrPubkey = await ctx.context.adapter.findOne<NostrPubkey>({
         model: "nostrPubkey",

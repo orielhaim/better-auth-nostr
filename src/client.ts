@@ -54,30 +54,66 @@ export const getNostrActions = (
 ) => {
   const loginUrl = getLoginUrl(options);
 
-  const getTokenWithNsec = async (nsec: string) => {
+  const fetchNonce = async (publicKey: string) => {
+    const { data } = await $fetch<{ nonce: string }>("/nostr/nonce", {
+      method: "POST",
+      body: {
+        publicKey,
+      },
+    });
+    const nonce = data?.nonce;
+    if (!nonce) {
+      throw new Error("Failed to fetch nonce");
+    }
+    return nonce;
+  };
+
+  const getTokenWithNsec = async (
+    nsec: string,
+    payload: Record<string, unknown>
+  ) => {
     const secretKey = parseSecretKey(nsec);
     return getToken(
       loginUrl,
       "post",
       (event) => finalizeEvent(event, secretKey),
-      true
+      true,
+      payload
     );
   };
 
-  const getTokenWithExtension = async () => {
+  const getTokenWithExtension = async (payload: Record<string, unknown>) => {
     if (!("nostr" in window)) {
       throw new Error("Nostr extension not found");
     }
 
     const sign = (window.nostr as any).signEvent.bind(window.nostr);
-    return getToken(loginUrl, "post", (e) => sign(e), true);
+    return getToken(loginUrl, "post", (e) => sign(e), true, payload);
+  };
+
+  const getPublicKey = async (nsec?: string) => {
+    if ("nostr" in window) {
+      return await (window.nostr as any).getPublicKey();
+    }
+
+    if (nsec) {
+      return getPublicKey(nsec);
+    }
+
+    return null;
   };
 
   const signInNostr = async (options?: { nsec?: string }) => {
-    console.log(loginUrl);
+    const publicKey = await getPublicKey(options?.nsec);
+    if (!publicKey) {
+      throw new Error("Failed to determine public key.");
+    }
+
+    const nonce = await fetchNonce(publicKey);
+    const payload = { nonce };
     const token = options?.nsec
-      ? await getTokenWithNsec(options.nsec)
-      : await getTokenWithExtension();
+      ? await getTokenWithNsec(options.nsec, payload)
+      : await getTokenWithExtension(payload);
 
     try {
       const response = await $fetch<{
@@ -87,7 +123,9 @@ export const getNostrActions = (
         method: "POST",
         headers: {
           authorization: token,
-          "content-type": "application/json",
+        },
+        body: {
+          nonce,
         },
       });
 
@@ -131,6 +169,7 @@ export const nostrClient = () => {
     getActions: ($fetch, $store, options) =>
       getNostrActions($fetch, { $store }, options),
     pathMethods: {
+      "/nostr/nonce": "GET",
       "/nostr/login": "POST",
       "/nostr/add-pubkey": "POST",
     },
