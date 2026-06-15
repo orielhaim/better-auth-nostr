@@ -18,8 +18,10 @@ describe("nostr() server plugin factory", () => {
     expect(schema).toBeDefined();
     expect(schema!.modelName).toBe("nostrPubkey");
     expect(schema!.fields.publicKey?.unique).toBe(true);
+    expect(schema!.fields.publicKey?.index).toBe(true);
     expect(schema!.fields.publicKey?.required).toBe(true);
     expect(schema!.fields.userId?.required).toBe(true);
+    expect(schema!.fields.userId?.index).toBe(true);
     expect(schema!.fields.userId?.references).toEqual({
       model: "user",
       field: "id",

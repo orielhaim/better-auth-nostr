@@ -23,12 +23,14 @@ export const nostr = (options?: NostrOptions) => {
             type: "string",
             required: true,
             unique: true,
+            index: true,
             fieldName: options?.fields?.publicKey ?? "publicKey",
           },
           userId: {
             type: "string",
             required: true,
             references: { model: "user", field: "id", onDelete: "cascade" },
+            index: true,
             fieldName: options?.fields?.userId ?? "userId",
           },
           createdAt: {
